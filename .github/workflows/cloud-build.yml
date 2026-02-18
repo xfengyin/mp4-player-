@@ -1,0 +1,67 @@
+on:
+  workflow_dispatch:
+    inputs:
+      firmware_url:
+        description: '可选：原厂固件下载 URL（如果要自动 repack，请填写）'
+        required: false
+      target_arch:
+        description: '目标架构 (armv5/armv7/mips/x86)'
+        required: true
+        default: 'armv7'
+      do_repack:
+        description: '是否尝试用原厂固件重打包 (yes/no)'
+        required: true
+        default: 'no'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.20'
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binwalk squashfs-tools p7zip-full xz-utils
+          # note: vendor-specific tools (mkimage etc) may be needed for final packaging
+
+      - name: Build player (cross-compile)
+        env:
+          GOOS: linux
+          CGO_ENABLED: 0
+          GOARCH: ${{ inputs.target_arch == 'armv7' && 'arm' || (inputs.target_arch == 'armv5' && 'arm' || (inputs.target_arch == 'mips' && 'mips' || 'amd64')) }}
+          GOARM: ${{ inputs.target_arch == 'armv7' && '7' || '5' }}
+        run: |
+          echo "Building for GOARCH=$GOARCH GOARM=$GOARM"
+          mkdir -p build
+          # adjust package/main path as needed
+          GOOS=linux GOARCH=$GOARCH GOARM=$GOARM CGO_ENABLED=0 go build -ldflags="-s -w" -o build/mp4-player ./cmd/mp4-player || true
+          # if Go build not used, you can add cross-compile toolchain for C here
+
+      - name: Optionally download firmware
+        if: ${{ inputs.do_repack == 'yes' && inputs.firmware_url != '' }}
+        run: |
+          mkdir -p firmware
+          echo "Downloading firmware from ${{ inputs.firmware_url }}"
+          curl -L -o firmware/original_firmware.bin "${{ inputs.firmware_url }}"
+
+      - name: Repack firmware (extract, inject binary, rebuild squashfs)
+        if: ${{ inputs.do_repack == 'yes' && inputs.firmware_url != '' }}
+        run: |
+          chmod +x scripts/pack_firmware.sh
+          scripts/pack_firmware.sh firmware/original_firmware.bin build/mp4-player build/output || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: |
+            build/**
+            build/output/**
+            firmware/**
